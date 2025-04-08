@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Personal Model - Smart Racket</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <style>
+    body { background-color: #121212; color: white; padding: 2rem; }
+    .btn { margin: 0.5rem; }
+    .slider-container { margin-top: 1rem; }
+    .slider-label { font-weight: bold; margin-bottom: 0.3rem; }
+    .section { margin-top: 2rem; padding: 1rem; background-color: #1f1f1f; border-radius: 10px; }
+    table { color: white; }
+    .live-box { font-size: 1.2rem; color: #00ff9f; margin-top: 1rem; }
+    .error-message { color: #ff6b6b; margin-top: 0.5rem; }
+    .shot-detected { color: #00ff9f; font-weight: bold; animation: flash 1s; }
+    .shot-rejected { color: #ff6b6b; font-style: italic; }
+    .confidence-high { color: #4caf50; }
+    .confidence-medium { color: #ffc107; }
+    .confidence-low { color: #f44336; }
+    .status-indicator { padding: 8px; margin-top: 10px; border-radius: 5px; }
+    .prediction-details {
+      margin-top: 10px;
+      border: 1px solid #ddd;
+      padding: 10px;
+      border-radius: 5px;
+    }
+    .probability-bar {
+      height: 20px;
+      background-color: #007bff;
+      border-radius: 3px;
+      margin-top: 5px;
+    }
+    .download-btn {
+      margin-top: 10px;
+    }
+    .tflite-status {
+      margin-top: 10px;
+      font-style: italic;
+      color: #666;
+    }
+    
+    @keyframes flash {
+      0% { background-color: rgba(0, 255, 159, 0.5); }
+      100% { background-color: transparent; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="mb-4">👤 Personal Model Training</h1>
+    <!-- Navigation Buttons -->
+    <div class="mb-3">
+      <a href="/" class="btn btn-warning">🧠 Train with Super Model</a>
+      <a href="/personal" class="btn btn-secondary">👤 Train with Your Personal Model</a>
+    </div>
+
+    <!-- Section 1: Capture Training Data -->
+    <div class="section">
+      <h4>Capture Personal Shot Data</h4>
+      <label>Shot Label:</label>
+      <input id="shotLabel" class="form-control" placeholder="e.g. Forehand Drive" />
+
+      <div class="slider-container">
+        <label for="p-threshold-slider" class="slider-label">📈 Shot Detection Threshold (acceleration magnitude)</label>
+        <input type="range" id="p-threshold-slider" min="0.001" max="1.000" step="0.001" value="0.20" class="form-range" />
+        <div>Current: <span id="p-threshold-value">0.20</span> g</div>
+      </div>
+
+      <div class="slider-container">
+        <label for="p-delay-slider" class="slider-label">⏳ Sampling Rate (ms)</label>
+        <input type="range" id="p-delay-slider" min="50" max="500" step="10" value="100" class="form-range" />
+        <div>Current: <span id="p-delay-value">100</span> ms</div>
+      </div>
+
+      <div>
+        <button class="btn btn-success" onclick="startPersonalSession()">Start Session</button>
+        <button class="btn btn-danger" onclick="stopPersonalSession()">Stop Session</button>
+      </div>
+      <div id="p-status" class="mt-2 status-indicator">Status: <strong>Idle</strong></div>
+      <div id="p-session-timer" class="mt-1">⏱️ Time: 00:00</div>
+      <div id="p-error-message" class="error-message"></div>
+    </div>
+
+    <!-- Section 2: Train Personal Model -->
+    <div class="section" id="training-section">
+      <h4>Train Model</h4>
+      <button class="btn btn-primary" onclick="trainPersonalModel()">Train Personal Model</button>
+      <div class="mt-2">
+        <div id="train-status" style="margin-bottom: 10px;"></div>
+        <div id="training-progress" style="display: none;">
+          <div class="progress">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%"></div>
+          </div>
+          <p>Training in progress, this may take a minute...</p>
+        </div>
+        <div id="training-results" style="display: none;">
+          <div class="card">
+            <div class="card-body">
+              <h5 class="card-title">Training Results</h5>
+              <p>Accuracy: <strong id="accuracy-value">0%</strong></p>
+              <p>Loss: <strong id="loss-value">0</strong></p>
+              <div id="tflite-status" class="tflite-status"></div>
+              <button class="btn btn-sm btn-secondary download-btn" onclick="downloadTFLiteModel()">Download TFLite Model</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 3: Test Personal Model -->
+    <div class="section" id="test-section">
+      <h4>Test Personal Model</h4>
+      <button class="btn btn-primary" id="test-model-btn" onclick="startTestSession()">Start Record for Testing</button>
+      <button class="btn btn-danger" onclick="stopTestSession()" style="display:none;" id="stop-test-btn">Stop Recording</button>
+      <div id="test-session-timer" class="mt-1">⏱️ Time: 00:00</div>
+      <div id="test-status" class="mt-2 status-indicator">Status: <strong>Stopped</strong></div>
+      <div id="shots-detected" class="mt-1">Shots Detected: <strong>0</strong></div>
+      <div id="test-result" class="mt-2"></div>
+    </div>
+  </div>
+
+  <script>
+    // IndexedDB Setup for test session data (for personal model)
+    let pdb;
+    const P_DB_NAME = "PersonalDB", P_STORE_NAME = "sessionData";
+    const pRequest = indexedDB.open(P_DB_NAME, 1);
+    pRequest.onupgradeneeded = e => {
+      pdb = e.target.result;
+      pdb.createObjectStore(P_STORE_NAME, { autoIncrement: true });
+    };
+    pRequest.onsuccess = e => { pdb = e.target.result; };
+    pRequest.onerror = () => alert("Failed to open Personal IndexedDB");
+
+    function pStoreInIndexedDB(data) {
+      const tx = pdb.transaction(P_STORE_NAME, "readwrite");
+      tx.objectStore(P_STORE_NAME).add(data);
+    }
+    function pClearIndexedDB() {
+      const tx = pdb.transaction(P_STORE_NAME, "readwrite");
+      tx.objectStore(P_STORE_NAME).clear();
+    }
+    function pReadAllData(callback) {
+      const tx = pdb.transaction(P_STORE_NAME, "readonly");
+      const store = tx.objectStore(P_STORE_NAME);
+      const data = [];
+      store.openCursor().onsuccess = event => {
+        const cursor = event.target.result;
+        if (cursor) {
+          data.push(cursor.value);
+          cursor.continue();
+        } else {
+          callback(data);
+        }
+      };
+    }
+
+    // --- Variables for Personal Data Capture ---
+    let pBluetoothCharacteristic;
+    let isPRecording = false;
+    let pRawSensorData = [];
+    let pLastTimestamp = 0;
+    let pSessionStartTime;
+    let pTimerInterval;
+    
+    // Variables for shot detection
+    let isInShot = false;
+    let currentShot = [];
+    let shotTimeout;
+    const SHOT_TIMEOUT_MS = 500; // Time to consider a shot complete after no new data
+    const MIN_SHOT_INTENSITY = 2.0; // Minimum acceleration magnitude to detect a shot
+    
+    // Capture sliders
+    const pThresholdSlider = document.getElementById("p-threshold-slider");
+    const pDelaySlider = document.getElementById("p-delay-slider");
+    pThresholdSlider.addEventListener("input", (e) => {
+      document.getElementById("p-threshold-value").textContent = parseFloat(e.target.value).toFixed(3);
+    });
+    pDelaySlider.addEventListener("input", (e) => {
+      document.getElementById("p-delay-value").textContent = e.target.value;
+    });
+
+    async function connectPersonalBluetooth() {
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix: "ESP32" }],
+          optionalServices: ["12345678-1234-1234-1234-1234567890ab"]
+        });
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService("12345678-1234-1234-1234-1234567890ab");
+        pBluetoothCharacteristic = await service.getCharacteristic("abcdefab-1234-1234-1234-abcdefabcdef");
+        document.getElementById("p-status").innerHTML = `Status: <strong>Connected to ${device.name}</strong>`;
+      } catch (error) {
+        document.getElementById("p-error-message").textContent = "Bluetooth connection failed: " + error.message;
+      }
+    }
+
+    function pHandleData(event) {
+      if (!isPRecording) return;
+      const now = Date.now();
+      const delay = parseInt(pDelaySlider.value);
+      if (now - pLastTimestamp < delay) return;
+      pLastTimestamp = now;
+      const value = new TextDecoder().decode(event.target.value);
+      const parts = value.split(",").map(Number);
+      if (parts.length < 6) return;
+      const [ax, ay, az, gx, gy, gz] = parts;
+      
+      // Calculate acceleration magnitude
+      const magnitude = Math.sqrt(ax*ax + ay*ay + az*az);
+      const threshold = parseFloat(pThresholdSlider.value);
+      
+      // Shot detection logic
+      if (!isInShot && magnitude > threshold) {
+        // Start of a potential shot
+        isInShot = true;
+        currentShot = [];
+        document.getElementById("p-status").innerHTML = "Status: <strong class='shot-detected'>Shot Detected!</strong>";
+        document.getElementById("p-status").className = "mt-2 status-indicator bg-info";
+      }
+      
+      // If we're in a shot, add this data point
+      if (isInShot) {
+        currentShot.push({ ax, ay, az, gx, gy, gz });
+        
+        // Clear any existing timeout
+        if (shotTimeout) clearTimeout(shotTimeout);
+        
+        // Set a new timeout to mark the end of this shot
+        shotTimeout = setTimeout(() => {
+          processEndOfShot();
+        }, SHOT_TIMEOUT_MS);
+      }
+    }
+
+    function processEndOfShot() {
+      if (currentShot.length > 0) {
+        // It's a shot, save it if it meets criteria
+        const shotLabel = document.getElementById("shotLabel").value;
+        
+        if (!shotLabel.trim()) {
+          document.getElementById("p-error-message").textContent = "Please enter a shot label before recording.";
+          document.getElementById("p-status").innerHTML = "Status: <strong class='shot-rejected'>Shot Rejected - No Label</strong>";
+          document.getElementById("p-status").className = "mt-2 status-indicator bg-warning";
+        } else {
+          document.getElementById("p-error-message").textContent = "";
+          document.getElementById("p-status").innerHTML = "Status: <strong class='shot-detected'>Processing Shot...</strong>";
+          document.getElementById("p-status").className = "mt-2 status-indicator bg-info";
+          
+          // Send shot to backend
+          fetch("/save_personal_shot", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ shot_name: shotLabel, features: currentShot })
+          }).then(res => res.json())
+            .then(data => {
+              console.log("Shot save response:", data);
+              // Update UI based on response from backend
+              if (data.valid) {
+                document.getElementById("p-status").innerHTML = "Status: <strong class='shot-detected'>Shot Saved!</strong>";
+                document.getElementById("p-status").className = "mt-2 status-indicator bg-success";
+              } else {
+                document.getElementById("p-status").innerHTML = `Status: <strong class='shot-rejected'>${data.message || 'Failed threshold check'}</strong>`;
+                document.getElementById("p-status").className = "mt-2 status-indicator bg-warning";
+              }
+            })
+            .catch(err => {
+              console.error("Error saving shot:", err);
+              document.getElementById("p-status").innerHTML = "Status: <strong class='shot-rejected'>Error Saving Shot</strong>";
+              document.getElementById("p-status").className = "mt-2 status-indicator bg-danger";
+            });
+        }
+        
+        // Reset for next shot detection
+        setTimeout(() => {
+          if (isPRecording) {
+            document.getElementById("p-status").innerHTML = "Status: <strong>Recording...</strong>";
+            document.getElementById("p-status").className = "mt-2 status-indicator";
+          }
+        }, 1500);
+        
+        isInShot = false;
+        currentShot = [];
+      }
+    }
+
+    async function startPersonalSession() {
+      if (!pBluetoothCharacteristic) {
+        await connectPersonalBluetooth();
+        return;
+      }
+      
+      const shotLabel = document.getElementById("shotLabel").value.trim();
+      if (!shotLabel) {
+        document.getElementById("p-error-message").textContent = "Please enter a shot label before starting.";
+        return;
+      } else {
+        document.getElementById("p-error-message").textContent = "";
+      }
+      
+      document.getElementById("p-status").innerHTML = "Status: <strong>Recording...</strong>";
+      document.getElementById("p-status").className = "mt-2 status-indicator";
+      isPRecording = true;
+      pRawSensorData = [];
+      
+      pSessionStartTime = Date.now();
+      updatePTimer();
+      pTimerInterval = setInterval(updatePTimer, 1000);
+      
+      // Reset shot detection state
+      isInShot = false;
+      currentShot = [];
+      if (shotTimeout) clearTimeout(shotTimeout);
+      
+      pBluetoothCharacteristic.startNotifications()
+        .then(() => {
+          pBluetoothCharacteristic.addEventListener('characteristicvaluechanged', pHandleData);
+        })
+        .catch(err => {
+          document.getElementById("p-error-message").textContent = "Failed to start notifications: " + err;
+        });
+    }
+
+    async function stopPersonalSession() {
+      isPRecording = false;
+      clearInterval(pTimerInterval);
+      document.getElementById("p-session-timer").textContent = "⏱️ Time: 00:00";
+      if (pBluetoothCharacteristic) {
+        await pBluetoothCharacteristic.stopNotifications();
+        pBluetoothCharacteristic.removeEventListener("characteristicvaluechanged", pHandleData);
+      }
+      document.getElementById("p-status").innerHTML = "Status: <strong>Stopped</strong>";
+      document.getElementById("p-status").className = "mt-2 status-indicator";
+    }
+
+    function updatePTimer() {
+      const elapsed = Date.now() - pSessionStartTime;
+      const minutes = Math.floor(elapsed / 60000).toString().padStart(2, '0');
+      const seconds = Math.floor((elapsed % 60000) / 1000).toString().padStart(2, '0');
+      document.getElementById("p-session-timer").textContent = `⏱️ Time: ${minutes}:${seconds}`;
+    }
+
+    // --- Personal Model Training and Testing ---
+    async function trainPersonalModel() {
+      document.getElementById("train-status").textContent = "Checking data...";
+      document.getElementById("training-progress").style.display = "block";
+      document.getElementById("training-results").style.display = "none";
+      
+      try {
+        const response = await fetch("/train_personal_model", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" }
+        });
+        
+        const data = await response.json();
+        document.getElementById("training-progress").style.display = "none";
+        
+        if (data.error) {
+          document.getElementById("train-status").innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+        } else {
+          document.getElementById("train-status").innerHTML = `<div class="alert alert-success">${data.message}</div>`;
+          document.getElementById("training-results").style.display = "block";
+          document.getElementById("accuracy-value").textContent = `${data.accuracy.toFixed(2)}%`;
+          document.getElementById("loss-value").textContent = data.loss.toFixed(4);
+          document.getElementById("tflite-status").textContent = data.tflite_status || "TFLite conversion successful!";
+          
+          // Show the test section after successful training
+          document.getElementById("test-section").style.display = "block";
+        }
+      } catch (error) {
+        document.getElementById("training-progress").style.display = "none";
+        document.getElementById("train-status").innerHTML = `<div class="alert alert-danger">Training failed: ${error.message}</div>`;
+        console.error("Training error:", error);
+      }
+    }
+
+    function downloadTFLiteModel() {
+      window.location.href = "/to-tflite";
+    }
+
+    // Variables for Test Session
+    let isTestRecording = false;
+    let testSessionStartTime = 0;
+    let testLastTimestamp = 0;
+    let testTimerInterval;
+    let shotCount = 0;
+
+    async function startTestSession() {
+      // Initialize bluetooth connection for testing
+      try {
+        if (!pBluetoothCharacteristic) {
+          await connectPersonalBluetooth();
+        }
+        
+        document.getElementById("test-model-btn").style.display = "none";
+        document.getElementById("stop-test-btn").style.display = "inline-block";
+        document.getElementById("test-status").innerHTML = "Status: <strong>Recording for Test...</strong>";
+        document.getElementById("test-status").className = "mt-2 status-indicator";
+        document.getElementById("test-result").innerHTML = "";
+        document.getElementById("shots-detected").innerHTML = "Shots Detected: <strong>0</strong>";
+        isTestRecording = true;
+        testLastTimestamp = Date.now();
+        testSessionStartTime = Date.now();
+        shotCount = 0;
+        
+        // Clear previous test data
+        pClearIndexedDB();
+        
+        testTimerInterval = setInterval(updateTestTimer, 1000);
+        
+        // Start listening for sensor data
+        if (pBluetoothCharacteristic) {
+          await pBluetoothCharacteristic.startNotifications();
+          pBluetoothCharacteristic.addEventListener('characteristicvaluechanged', testHandleData);
+        }
+      } catch (error) {
+        console.error("Connection error:", error);
+        document.getElementById("test-status").innerHTML = "Status: <strong>Connection Failed</strong>";
+        document.getElementById("test-status").className = "mt-2 status-indicator bg-danger";
+      }
+    }
+
+    async function stopTestSession() {
+      isTestRecording = false;
+      document.getElementById("test-model-btn").style.display = "inline-block";
+      document.getElementById("stop-test-btn").style.display = "none";
+      document.getElementById("test-status").innerHTML = "Status: <strong>Processing Data...</strong>";
+      document.getElementById("test-status").className = "mt-2 status-indicator bg-info";
+      
+      if (testTimerInterval) {
+        clearInterval(testTimerInterval);
+        testTimerInterval = null;
+      }
+      
+      // Stop listening for sensor data
+      if (pBluetoothCharacteristic) {
+        await pBluetoothCharacteristic.stopNotifications();
+        pBluetoothCharacteristic.removeEventListener('characteristicvaluechanged', testHandleData);
+      }
+      
+      // Process all collected data
+      pReadAllData(testData => {
+        if (testData.length === 0) {
+          document.getElementById("test-status").innerHTML = "Status: <strong>No Data Collected</strong>";
+          document.getElementById("test-status").className = "mt-2 status-indicator bg-warning";
+          document.getElementById("test-result").innerHTML = "<div class='alert alert-warning'>No data collected for testing.</div>";
+          return;
+        }
+        
+        // Send data for prediction
+        fetch("/predict_personal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(testData)
+        })
+        .then(res => res.json())
+        .then(data => {
+          document.getElementById("test-status").innerHTML = "Status: <strong>Analysis Complete</strong>";
+          document.getElementById("test-status").className = "mt-2 status-indicator bg-success";
+          
+          if (data.error) {
+            document.getElementById("test-result").innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+          } else {
+            // Display predictions
+            let html = `<div class="alert alert-success">
+              <strong>Total Predictions: ${data.total_shots}</strong>
+            </div>`;
+            
+            // Create a table for predictions
+            html += `<table class="table table-dark table-striped mt-3">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Shot Type</th>
+                  <th>Confidence</th>
+                  <th>Rating</th>
+                </tr>
+              </thead>
+              <tbody>`;
+              
+            data.predictions.forEach((pred, idx) => {
+              const confidenceClass = pred.Confidence > 0.75 ? "confidence-high" : 
+                                    pred.Confidence > 0.5 ? "confidence-medium" : "confidence-low";
+              
+              html += `<tr>
+                <td>${idx + 1}</td>
+                <td>${pred["Predicted Shot"]}</td>
+                <td class="${confidenceClass}">${(pred.Confidence * 100).toFixed(1)}%</td>
+                <td>${pred["Rating (1-5)"]}/5</td>
+              </tr>`;
+            });
+            
+            html += `</tbody></table>`;
+            document.getElementById("test-result").innerHTML = html;
+          }
+        })
+        .catch(err => {
+          console.error("Prediction error:", err);
+          document.getElementById("test-status").innerHTML = "Status: <strong>Error</strong>";
+          document.getElementById("test-status").className = "mt-2 status-indicator bg-danger";
+          document.getElementById("test-result").innerHTML = `<div class="alert alert-danger">Failed to process predictions: ${err.message}</div>`;
+        });
+      });
+    }
+    
+    function testHandleData(event) {
+      if (!isTestRecording) return;
+      
+      const now = Date.now();
+      const delay = parseInt(document.getElementById("p-delay-slider").value || 100);
+      if (now - testLastTimestamp < delay) return;
+      testLastTimestamp = now;
+      
+      const value = new TextDecoder().decode(event.target.value);
+      const parts = value.split(",").map(Number);
+      if (parts.length < 6) return;
+      
+      const [ax, ay, az, gx, gy, gz] = parts;
+      const magnitude = Math.sqrt(ax*ax + ay*ay + az*az);
+      const threshold = parseFloat(document.getElementById("p-threshold-slider").value || 0.5);
+      
+      // Shot detection logic
+      if (!isInShot && magnitude > threshold) {
+        // Start of a potential shot
+        isInShot = true;
+        currentShot = [];
+        document.getElementById("test-status").innerHTML = "Status: <strong class='shot-detected'>Shot Detected!</strong>";
+        document.getElementById("test-status").className = "mt-2 status-indicator bg-info";
+        
+        // Increment shot counter
+        shotCount++;
+        document.getElementById("shots-detected").innerHTML = `Shots Detected: <strong>${shotCount}</strong>`;
+      }
+      
+      // If we're in a shot, add this data point
+      if (isInShot) {
+        // Store raw sensor data in IndexedDB
+        pStoreInIndexedDB({ ax, ay, az, gx, gy, gz });
+        
+        // Also save to current shot array
+        currentShot.push({ ax, ay, az, gx, gy, gz });
+        
+        // Clear any existing timeout
+        if (shotTimeout) clearTimeout(shotTimeout);
+        
+        // Set a new timeout to mark the end of this shot
+        shotTimeout = setTimeout(() => {
+          if (isTestRecording) {
+            document.getElementById("test-status").innerHTML = "Status: <strong>Recording for Test...</strong>";
+            document.getElementById("test-status").className = "mt-2 status-indicator";
+          }
+          isInShot = false;
+          currentShot = [];
+        }, SHOT_TIMEOUT_MS);
+      }
+    }
+
+    function updateTestTimer() {
+      if (!isTestRecording) return;
+      const elapsedTime = Math.floor((Date.now() - testSessionStartTime) / 1000);
+      const minutes = Math.floor(elapsedTime / 60).toString().padStart(2, '0');
+      const seconds = (elapsedTime % 60).toString().padStart(2, '0');
+      document.getElementById("test-session-timer").textContent = `⏱️ Time: ${minutes}:${seconds}`;
+    }
+  </script>
+</body>
+</html>
