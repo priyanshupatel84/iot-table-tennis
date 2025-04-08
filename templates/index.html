@@ -1,0 +1,242 @@
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Smart Racket Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <style>
+    body { padding: 2rem; background-color: #121212; color: white; }
+    .btn { margin: 0.5rem; }
+    .summary-card { background-color: #1f1f1f; border-radius: 10px; padding: 1rem; }
+    .live-box { font-size: 1.5rem; margin-top: 1rem; color: #00ff9f; }
+    table { color: white; }
+    #status strong { color: #00d9ff; }
+    .error-message { color: #ff6b6b; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="mb-4">🏓 Smart Racket Dashboard</h1>
+    <div class="mb-3">
+      <a href="/train" class="btn btn-warning">🛠️ Train New Shots</a>
+    </div>
+    
+    <div class="mb-3">
+      <button class="btn btn-primary" onclick="connectBluetooth()">🔗 Connect via Bluetooth</button>
+      <p class="text-muted mt-2">OR</p>
+      <div class="d-flex">
+        <div class="flex-grow-1 me-2">
+          <label class="form-label">🔌 Select COM Port:</label>
+          <select id="portSelect" class="form-select"></select>
+        </div>
+        <div style="align-self: end; margin-bottom: 1rem">
+          <button class="btn btn-secondary" onclick="fetchPorts()">🔄 Refresh Ports</button>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <button class="btn btn-success" onclick="startSession()">Start Session</button>
+      <button class="btn btn-danger" onclick="stopSession()">Stop Session</button>
+    </div>
+
+    <div id="status" class="mt-3">Status: <strong>Idle</strong></div>
+    <div id="error-message" class="error-message"></div>
+
+    <div class="live-box">🔁 Live Prediction: <span id="live-pred">N/A</span></div>
+
+    <div class="result-box mt-4">
+      <h4>Session Summary</h4>
+      <div id="summary" class="summary-card">
+        <div id="total-shots" class="mb-3">Total shots: 0</div>
+        <table class="table">
+          <thead>
+            <tr><th>Shot Type</th><th>Rating (1-5)</th></tr>
+          </thead>
+          <tbody id="summary-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let bluetoothCharacteristic;
+    let isSessionActive = false;
+    let rawSensorData = [];
+    let lastTimestamp = 0;
+
+    // IndexedDB setup
+    let db;
+    const DB_NAME = "SensorDB", STORE_NAME = "sessionData";
+
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onupgradeneeded = e => {
+      db = e.target.result;
+      db.createObjectStore(STORE_NAME, { autoIncrement: true });
+    };
+    request.onsuccess = e => { db = e.target.result; };
+    request.onerror = () => alert("Failed to open IndexedDB");
+
+    function storeInIndexedDB(data) {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).add(data);
+    }
+
+    function clearIndexedDB() {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).clear();
+    }
+
+    function readAllData(callback) {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const store = tx.objectStore(STORE_NAME);
+      const data = [];
+      store.openCursor().onsuccess = event => {
+        const cursor = event.target.result;
+        if (cursor) {
+          data.push(cursor.value);
+          cursor.continue();
+        } else {
+          callback(data);
+        }
+      };
+    }
+
+    async function connectBluetooth() {
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix: "ESP32" }],
+          optionalServices: ["12345678-1234-1234-1234-1234567890ab"]
+        });
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService("12345678-1234-1234-1234-1234567890ab");
+        bluetoothCharacteristic = await service.getCharacteristic("abcdefab-1234-1234-1234-abcdefabcdef");
+
+        document.getElementById("status").innerHTML = `Status: <strong>Connected to ${device.name}</strong>`;
+      } catch (error) {
+        document.getElementById("error-message").textContent = "Bluetooth connection failed: " + error.message;
+      }
+    }
+
+    function handleData(event) {
+      if (!isSessionActive) return;
+
+      const now = Date.now();
+      if (now - lastTimestamp < 500) return; // 500ms interval
+      lastTimestamp = now;
+
+      const value = new TextDecoder().decode(event.target.value);
+      const parts = value.split(",").map(Number);
+      if (parts.length < 6) return;
+
+      const [ax, ay, az, gx, gy, gz] = parts;
+      rawSensorData.push({ ax, ay, az, gx, gy, gz });
+
+      if (rawSensorData.length >= 5) {
+        const means = calcMeans(rawSensorData);
+        const variances = calcVariances(rawSensorData, means);
+        const sample = { ...means, ...variances };
+        storeInIndexedDB(sample);
+        rawSensorData = [];
+      }
+    }
+
+    function calcMeans(data) {
+      const mean = {};
+      ['ax', 'ay', 'az', 'gx', 'gy', 'gz'].forEach(key => {
+        mean[key + '_mean'] = data.reduce((sum, d) => sum + d[key], 0) / data.length;
+      });
+      return mean;
+    }
+
+    function calcVariances(data, means) {
+      const variance = {};
+      ['ax', 'ay', 'az', 'gx', 'gy', 'gz'].forEach(key => {
+        variance[key + '_var'] = data.reduce((sum, d) => sum + Math.pow(d[key] - means[key + '_mean'], 2), 0) / data.length;
+      });
+      return variance;
+    }
+
+    async function startSession() {
+      clearIndexedDB();
+      await fetch("/reset_session", { method: "POST" });
+
+      if (!bluetoothCharacteristic) {
+        document.getElementById("error-message").textContent = "Please connect to the ESP32 first.";
+        return;
+      }
+
+      // Clear previous results
+      document.getElementById("summary-body").innerHTML = "";
+      document.getElementById("total-shots").textContent = "Total shots: 0";
+      document.getElementById("live-pred").textContent = "N/A";
+      document.getElementById("error-message").textContent = "";
+
+      isSessionActive = true;
+      await bluetoothCharacteristic.startNotifications();
+      bluetoothCharacteristic.addEventListener("characteristicvaluechanged", handleData);
+      document.getElementById("status").innerHTML = `Status: <strong>Streaming Data...</strong>`;
+    }
+
+    async function stopSession() {
+      isSessionActive = false;
+      if (bluetoothCharacteristic) {
+        await bluetoothCharacteristic.stopNotifications();
+        bluetoothCharacteristic.removeEventListener("characteristicvaluechanged", handleData);
+      }
+
+      document.getElementById("status").innerHTML = `Status: <strong>Stopped</strong>`;
+
+      readAllData(sessionData => {
+        if (sessionData.length === 0) {
+          document.getElementById("error-message").textContent = "No data collected in this session.";
+          return;
+        }
+
+        fetch("/predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(sessionData)
+        })
+        .then(res => res.json())
+        .then(data => {
+          if (data.error) {
+            document.getElementById("error-message").textContent = data.error;
+            return;
+          }
+
+          // Update total shots
+          document.getElementById("total-shots").textContent = `Total shots: ${data.total_shots}`;
+          
+          // Update summary table
+          const tbody = document.getElementById("summary-body");
+          tbody.innerHTML = "";
+          
+          data.predictions.forEach(pred => {
+            const row = document.createElement("tr");
+            row.innerHTML = `<td>${pred['Predicted Shot']}</td><td>${pred['Rating (1-5)']}</td>`;
+            tbody.appendChild(row);
+          });
+          
+          // Update live prediction with the last shot
+          if (data.predictions.length > 0) {
+            const lastPred = data.predictions[data.predictions.length - 1];
+            document.getElementById("live-pred").textContent = 
+              `${lastPred['Predicted Shot']} (Rating: ${lastPred['Rating (1-5)']})`;
+          }
+        })
+        .catch(err => {
+          console.error("Prediction error:", err);
+          document.getElementById("error-message").textContent = "Prediction failed. See console for details.";
+        });
+      });
+    }
+
+    function fetchPorts() {
+      console.log("Refreshing COM ports...");
+    }
+  </script>
+</body>
+</html>
