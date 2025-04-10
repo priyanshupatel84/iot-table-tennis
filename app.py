@@ -353,8 +353,7 @@ def save_personal_shot():
             'az': point.get('az', 0),
             'gx': point.get('gx', 0),
             'gy': point.get('gy', 0),
-            'gz': point.get('gz', 0),
-            'rating': 5.0  # Default rating
+            'gz': point.get('gz', 0)
         })
     
     # Create DataFrame
@@ -389,10 +388,11 @@ def train_personal_model():
         if len(shot_types) < 1:
             return jsonify({"error": f"Need at least 1 shot type. Currently have: {', '.join(shot_types)}"}), 400
         
-        # Feature columns (all except shot_name and rating)
-        X = data.drop(['shot_name', 'rating'], axis=1, errors='ignore')
-        if 'ratings' in X.columns:
-            X = X.drop(['ratings'], axis=1, errors='ignore')
+        # Get feature columns (all columns except shot_name and any rating columns)
+        feature_cols = [col for col in data.columns if col != 'shot_name' and col not in ['rating', 'ratings']]
+        
+        # Feature columns
+        X = data[feature_cols]
         
         # Target column
         y = data['shot_name'].str.strip()  # Strip whitespace from shot names
@@ -428,13 +428,13 @@ def train_personal_model():
             metrics=['accuracy']
         )
         
-        # Train the model with fewer epochs to avoid connection timeout
+        # Train the model
         history = model.fit(
             X_scaled, y_encoded,
-            epochs=20,  # Reduced from 50 to 20
+            epochs=20,
             batch_size=8,
             validation_split=0.2,
-            verbose=0  # Set to 0 to reduce console output
+            verbose=1  # Set to 1 to see progress
         )
         
         # Get training metrics
@@ -505,8 +505,13 @@ def predict_shot():
         
         # Check if model exists
         model_path = os.path.join(base_path, 'personal_model.h5')
+        encoder_path = os.path.join(base_path, 'personal_encoder.pkl')
+        
         if not os.path.exists(model_path):
             return jsonify({"error": "No trained model found. Train a model first."}), 400
+            
+        if not os.path.exists(encoder_path):
+            return jsonify({"error": "Label encoder not found. Train a model first."}), 400
         
         # Save the test data to session.json
         session_data = {
@@ -539,8 +544,9 @@ def predict_shot():
         scaler = joblib.load(os.path.join(base_path, 'personal_scaler.pkl'))
         X_scaled = scaler.transform(X_mean)
         
-        # Load the model
+        # Load the model and label encoder
         model = tf.keras.models.load_model(model_path)
+        label_encoder = joblib.load(encoder_path)
         
         # Make prediction (get class probabilities)
         prediction_probs = model.predict(X_scaled)[0]
@@ -608,9 +614,12 @@ def to_tflite():
             
         # Generate quantization data
         data = pd.read_csv(personal_data_path)
-        X = data.drop(['shot_name', 'rating'], axis=1, errors='ignore')
-        if 'ratings' in X.columns:
-            X = X.drop(['ratings'], axis=1, errors='ignore')
+        
+        # Get feature columns (all columns except shot_name and any rating columns)
+        feature_cols = [col for col in data.columns if col != 'shot_name' and col not in ['rating', 'ratings']]
+        
+        # Feature data
+        X = data[feature_cols]
             
         scaler = joblib.load(os.path.join(base_path, 'personal_scaler.pkl'))
         X_scaled = scaler.transform(X)
