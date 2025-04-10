@@ -1,0 +1,84 @@
+#include <Wire.h> 
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+// MPU6050 setup
+Adafruit_MPU6050 mpu;
+
+// BLE setup
+BLEServer* pServer = nullptr;
+BLECharacteristic* pCharacteristic = nullptr;
+bool deviceConnected = false;
+
+// UUIDs for BLE Service and Characteristic
+#define SERVICE_UUID        "12345678-1234-1234-1234-1234567890ab"
+#define CHARACTERISTIC_UUID "abcdefab-1234-1234-1234-abcdefabcdef"
+
+// Callback for BLE connection events
+class MyServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+  }
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) delay(10);
+
+  // MPU initialization
+  if (!mpu.begin()) {
+    Serial.println("Failed to find MPU6050 chip");
+    while (1) {
+      delay(10);
+    }
+  }
+  Serial.println("MPU6050 Found!");
+
+  // Initialize BLE
+  BLEDevice::init("ESP32_MPU6050_BLE");
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_NOTIFY
+                    );
+
+  pCharacteristic->addDescriptor(new BLE2902());
+  pService->start();
+
+  // Start advertising
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->start();
+  Serial.println("Waiting for BLE client...");
+}
+
+void loop() {
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+
+  // Format 12 values: 6 from MPU + 6 dummy zeros
+  char sensorData[150];
+  snprintf(sensorData, sizeof(sensorData), "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,0.0,0.0,0.0,0.0,0.0,0.0",
+           a.acceleration.x, a.acceleration.y, a.acceleration.z,
+           g.gyro.x, g.gyro.y, g.gyro.z);
+
+  if (deviceConnected) {
+    pCharacteristic->setValue(sensorData);
+    pCharacteristic->notify();
+    Serial.println(sensorData);
+  }
+
+  delay(50);  // Send data every 50ms
+}
