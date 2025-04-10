@@ -515,8 +515,19 @@ def predict_shot():
     """Predict the shot type from sensor data and save test data to session.json"""
     try:
         data = request.get_json()
-        features = data.get('features', [])
+        use_session_json = data.get('use_session_json', False)
         
+        # Load sensor data either from session.json or directly from request
+        if use_session_json:
+            try:
+                with open('session.json', 'r') as f:
+                    session_data = json.load(f)
+                features = session_data.get('features', [])
+            except (FileNotFoundError, json.JSONDecodeError):
+                return jsonify({"error": "No test data found. Record a shot first."}), 400
+        else:
+            features = data.get('features', [])
+            
         if not features or len(features) < 3:
             return jsonify({"error": "Not enough data for prediction"}), 400
         
@@ -530,28 +541,23 @@ def predict_shot():
         if not os.path.exists(encoder_path):
             return jsonify({"error": "Label encoder not found. Train a model first."}), 400
         
-        # Save the test data to session.json
-        session_data = {
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "features": features
-        }
-        
-        with open('session.json', 'w') as f:
-            json.dump(session_data, f, indent=2)
-        
         # Process the shot data - use all data points for prediction
         # Create a matrix of features from all data points
         data_points = []
         for point in features:
-            data_points.append([
-                point.get('ax', 0), 
-                point.get('ay', 0), 
-                point.get('az', 0), 
-                point.get('gx', 0), 
-                point.get('gy', 0), 
-                point.get('gz', 0)
-            ])
+            if all(k in point for k in ['ax', 'ay', 'az', 'gx', 'gy', 'gz']):
+                data_points.append([
+                    point.get('ax', 0), 
+                    point.get('ay', 0), 
+                    point.get('az', 0), 
+                    point.get('gx', 0), 
+                    point.get('gy', 0), 
+                    point.get('gz', 0)
+                ])
         
+        if not data_points:
+            return jsonify({"error": "No valid data points in session"}), 400
+            
         X = np.array(data_points)
         
         # Calculate average of all data points for a single prediction
@@ -573,13 +579,16 @@ def predict_shot():
         
         print(f"Shot predicted: {predicted_shot} with confidence {confidence:.2f}")
         
+        # Create probabilities dictionary for all shot types
+        shot_probabilities = {}
+        for i, prob in enumerate(prediction_probs):
+            shot_type = label_encoder.inverse_transform([i])[0]
+            shot_probabilities[shot_type] = float(prob)
+            
         return jsonify({
             "prediction": predicted_shot,
             "confidence": confidence,
-            "probabilities": {
-                label_encoder.inverse_transform([i])[0]: float(prob) 
-                for i, prob in enumerate(prediction_probs)
-            },
+            "probabilities": shot_probabilities,
             "session_saved": True
         }), 200
     except Exception as e:
@@ -749,12 +758,30 @@ def record_session_data():
         if not shot_name or not sensor_data:
             return jsonify({"error": "Shot name and sensor data are required"}), 400
             
-        # Validate the sensor data
-        # Validate the shot data pattern
-        if not is_valid_shot(sensor_data):
-            print(f"Shot rejected: {shot_name}")
-            return jsonify({"message": "Data rejected - not a valid shot pattern", "status": "rejected"}), 200
-            
+        # Validate the sensor data using a simplified check
+        if len(sensor_data) < 3:  # At least 3 data points required
+            print(f"Shot rejected: {shot_name} - too few data points")
+            return jsonify({
+                "message": "Data rejected - not enough data points", 
+                "status": "rejected"
+            }), 200
+        
+        # Calculate max acceleration magnitude to validate shot
+        max_magnitude = 0
+        for point in sensor_data:
+            if all(k in point for k in ['ax', 'ay', 'az']):
+                ax, ay, az = point.get('ax', 0), point.get('ay', 0), point.get('az', 0)
+                magnitude = (ax**2 + ay**2 + az**2)**0.5
+                max_magnitude = max(max_magnitude, magnitude)
+        
+        if max_magnitude < 0.2:  # Minimum threshold check
+            print(f"Shot rejected: {shot_name} - insufficient acceleration")
+            return jsonify({
+                "message": "Shot rejected - insufficient movement detected", 
+                "status": "rejected"
+            }), 200
+        
+        # Process valid data points    
         valid_data_points = []
         for point in sensor_data:
             if all(k in point for k in ['ax', 'ay', 'az', 'gx', 'gy', 'gz']):
@@ -778,17 +805,22 @@ def record_session_data():
         file_exists = os.path.isfile(personal_data_path)
         if file_exists:
             # Read existing data
-            existing_data = pd.read_csv(personal_data_path)
-            
-            # Standardize columns: Convert 'ratings' to 'rating' if it exists
-            if 'ratings' in existing_data.columns and 'rating' not in existing_data.columns:
-                existing_data.rename(columns={'ratings': 'rating'}, inplace=True)
-                # Save the standardized data back
-                existing_data.to_csv(personal_data_path, index=False)
-                print("Standardized CSV: 'ratings' column renamed to 'rating'")
+            try:
+                existing_data = pd.read_csv(personal_data_path)
+                
+                # Standardize columns: Convert 'ratings' to 'rating' if it exists
+                if 'ratings' in existing_data.columns and 'rating' not in existing_data.columns:
+                    existing_data.rename(columns={'ratings': 'rating'}, inplace=True)
+                    # Save the standardized data back
+                    existing_data.to_csv(personal_data_path, index=False)
+                    print("Standardized CSV: 'ratings' column renamed to 'rating'")
+            except Exception as e:
+                print(f"Warning: Error reading existing CSV file: {str(e)}")
+                file_exists = False  # Treat as if file doesn't exist
         
         # Append to CSV
         df.to_csv(personal_data_path, mode='a', header=not file_exists, index=False)
+        print(f"Successfully saved {len(valid_data_points)} data points for '{shot_name}' to {personal_data_path}")
         
         return jsonify({
             "message": f"Recorded {len(valid_data_points)} data points for {shot_name}",
@@ -797,8 +829,12 @@ def record_session_data():
         }), 200
         
     except Exception as e:
-        print(f"Recording error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        error_msg = str(e)
+        print(f"Recording error: {error_msg}")
+        return jsonify({
+            "error": error_msg, 
+            "status": "error"
+        }), 500
 
 @app.route("/end_session", methods=["POST"])
 def end_session():
@@ -818,6 +854,49 @@ def end_session():
     except Exception as e:
         print(f"End session error: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+@app.route("/record_test_data", methods=["POST"])
+def record_test_data():
+    """Record test sensor data to session.json for prediction"""
+    try:
+        data = request.get_json()
+        sensor_data = data.get('sensor_data', [])
+        
+        if not sensor_data:
+            return jsonify({"error": "Sensor data is required"}), 400
+            
+        # Validate the sensor data
+        if len(sensor_data) < 3:  # At least 3 data points required
+            return jsonify({
+                "message": "Data rejected - not enough data points", 
+                "status": "rejected"
+            }), 200
+            
+        # Create session data structure
+        session_data = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "features": sensor_data
+        }
+        
+        # Save to session.json
+        with open('session.json', 'w') as f:
+            json.dump(session_data, f, indent=2)
+            
+        print(f"Successfully saved {len(sensor_data)} test data points to session.json")
+        
+        return jsonify({
+            "message": f"Recorded {len(sensor_data)} test data points",
+            "points_saved": len(sensor_data),
+            "status": "success"
+        }), 200
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Test recording error: {error_msg}")
+        return jsonify({
+            "error": error_msg, 
+            "status": "error"
+        }), 500
 
 if __name__ == "__main__":
     app.run(debug=True)

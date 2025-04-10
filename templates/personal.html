@@ -485,69 +485,92 @@
         pBluetoothCharacteristic.removeEventListener('characteristicvaluechanged', testHandleData);
       }
       
-      // Process all collected data
-      pReadAllData(testData => {
-        if (testData.length === 0) {
-          document.getElementById("test-status").innerHTML = "Status: <strong>No Data Collected</strong>";
-          document.getElementById("test-status").className = "mt-2 status-indicator bg-warning";
-          document.getElementById("test-result").innerHTML = "<div class='alert alert-warning'>No data collected for testing.</div>";
-          return;
+      // If there's an in-progress shot, process it
+      if (isInShot && currentShot.length >= 3) {
+        // Send the final shot data
+        try {
+          const response = await fetch("/record_test_data", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sensor_data: currentShot })
+          });
+          
+          await response.json();
+          console.log("Final shot data saved");
+        } catch (error) {
+          console.error("Error saving final shot:", error);
         }
         
-        // Send data for prediction
-        fetch("/predict_personal", {
+        isInShot = false;
+        currentShot = [];
+      }
+      
+      // Now directly use the session.json data for prediction
+      try {
+        // Submit the session.json data for prediction
+        const response = await fetch("/predict_shot", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(testData)
-        })
-        .then(res => res.json())
-        .then(data => {
-          document.getElementById("test-status").innerHTML = "Status: <strong>Analysis Complete</strong>";
-          document.getElementById("test-status").className = "mt-2 status-indicator bg-success";
+          body: JSON.stringify({ use_session_json: true })
+        });
+        
+        const data = await response.json();
+        
+        document.getElementById("test-status").innerHTML = "Status: <strong>Analysis Complete</strong>";
+        document.getElementById("test-status").className = "mt-2 status-indicator bg-success";
+        
+        if (data.error) {
+          document.getElementById("test-result").innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+        } else {
+          // Display prediction
+          let html = `<div class="alert alert-success">
+            <strong>Shot Prediction Results</strong>
+          </div>`;
           
-          if (data.error) {
-            document.getElementById("test-result").innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
-          } else {
-            // Display predictions
-            let html = `<div class="alert alert-success">
-              <strong>Total Predictions: ${data.total_shots}</strong>
-            </div>`;
+          html += `<div class="prediction-details">
+            <h5>Predicted Shot: <strong>${data.prediction}</strong></h5>
+            <p>Confidence: <strong>${(data.confidence * 100).toFixed(1)}%</strong></p>
+          </div>`;
+          
+          // Display probabilities if available
+          if (data.probabilities) {
+            html += `<h6>Probability Breakdown:</h6>
+            <div class="table-responsive">
+              <table class="table table-dark table-striped">
+                <thead>
+                  <tr>
+                    <th>Shot Type</th>
+                    <th>Probability</th>
+                  </tr>
+                </thead>
+                <tbody>`;
             
-            // Create a table for predictions
-            html += `<table class="table table-dark table-striped mt-3">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Shot Type</th>
-                  <th>Confidence</th>
-                  <th>Rating</th>
-                </tr>
-              </thead>
-              <tbody>`;
+            // Sort probabilities in descending order
+            const sortedShots = Object.entries(data.probabilities)
+              .sort((a, b) => b[1] - a[1]);
               
-            data.predictions.forEach((pred, idx) => {
-              const confidenceClass = pred.Confidence > 0.75 ? "confidence-high" : 
-                                    pred.Confidence > 0.5 ? "confidence-medium" : "confidence-low";
+            sortedShots.forEach(([shotType, prob]) => {
+              const probPercent = (prob * 100).toFixed(1);
+              const confidenceClass = prob > 0.75 ? "confidence-high" : 
+                                     prob > 0.5 ? "confidence-medium" : "confidence-low";
               
               html += `<tr>
-                <td>${idx + 1}</td>
-                <td>${pred["Predicted Shot"]}</td>
-                <td class="${confidenceClass}">${(pred.Confidence * 100).toFixed(1)}%</td>
-                <td>${pred["Rating (1-5)"]}/5</td>
+                <td>${shotType}</td>
+                <td class="${confidenceClass}">${probPercent}%</td>
               </tr>`;
             });
             
-            html += `</tbody></table>`;
-            document.getElementById("test-result").innerHTML = html;
+            html += `</tbody></table></div>`;
           }
-        })
-        .catch(err => {
-          console.error("Prediction error:", err);
-          document.getElementById("test-status").innerHTML = "Status: <strong>Error</strong>";
-          document.getElementById("test-status").className = "mt-2 status-indicator bg-danger";
-          document.getElementById("test-result").innerHTML = `<div class="alert alert-danger">Failed to process predictions: ${err.message}</div>`;
-        });
-      });
+          
+          document.getElementById("test-result").innerHTML = html;
+        }
+      } catch (error) {
+        console.error("Prediction error:", error);
+        document.getElementById("test-status").innerHTML = "Status: <strong>Error</strong>";
+        document.getElementById("test-status").className = "mt-2 status-indicator bg-danger";
+        document.getElementById("test-result").innerHTML = `<div class="alert alert-danger">Failed to process prediction: ${error.message}</div>`;
+      }
     }
     
     function testHandleData(event) {
@@ -581,17 +604,38 @@
       
       // If we're in a shot, add this data point
       if (isInShot) {
-        // Store raw sensor data in IndexedDB
-        pStoreInIndexedDB({ ax, ay, az, gx, gy, gz });
-        
-        // Also save to current shot array
+        // Store the data point for this shot
         currentShot.push({ ax, ay, az, gx, gy, gz });
+        
+        // Also store in IndexedDB for backup
+        pStoreInIndexedDB({ ax, ay, az, gx, gy, gz });
         
         // Clear any existing timeout
         if (shotTimeout) clearTimeout(shotTimeout);
         
         // Set a new timeout to mark the end of this shot
         shotTimeout = setTimeout(() => {
+          // Process the completed shot for testing
+          if (currentShot.length >= 3) {
+            // Send test data to be saved in session.json
+            fetch("/record_test_data", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ 
+                sensor_data: currentShot 
+              })
+            }).then(res => res.json())
+              .then(data => {
+                console.log("Test data saved:", data);
+                if (data.status === "success") {
+                  document.getElementById("test-status").innerHTML = `Status: <strong>Shot Recorded for Testing (${data.points_saved} points)</strong>`;
+                }
+              })
+              .catch(err => {
+                console.error("Error saving test data:", err);
+              });
+          }
+          
           if (isTestRecording) {
             document.getElementById("test-status").innerHTML = "Status: <strong>Recording for Test...</strong>";
             document.getElementById("test-status").className = "mt-2 status-indicator";
