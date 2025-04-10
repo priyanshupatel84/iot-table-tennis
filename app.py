@@ -359,8 +359,18 @@ def save_personal_shot():
     # Create DataFrame
     df = pd.DataFrame(rows)
     
-    # Check if file exists
+    # Check if file exists and standardize existing columns if needed
     file_exists = os.path.isfile(personal_data_path)
+    if file_exists:
+        # Read existing data
+        existing_data = pd.read_csv(personal_data_path)
+        
+        # Standardize columns: Convert 'ratings' to 'rating' if it exists
+        if 'ratings' in existing_data.columns and 'rating' not in existing_data.columns:
+            existing_data.rename(columns={'ratings': 'rating'}, inplace=True)
+            # Save the standardized data back
+            existing_data.to_csv(personal_data_path, index=False)
+            print("Standardized CSV: 'ratings' column renamed to 'rating'")
     
     # Append to CSV
     df.to_csv(personal_data_path, mode='a', header=not file_exists, index=False)
@@ -379,6 +389,13 @@ def train_personal_model():
         # Load the data from CSV
         data = pd.read_csv(personal_data_path)
         
+        # Standardize rating column names
+        if 'ratings' in data.columns and 'rating' not in data.columns:
+            data.rename(columns={'ratings': 'rating'}, inplace=True)
+            # Save standardized data
+            data.to_csv(personal_data_path, index=False)
+            print("Standardized CSV: 'ratings' column renamed to 'rating'")
+        
         # Check if there's enough data
         if len(data) < 10:  # Need at least 10 data points for training
             return jsonify({"error": f"Not enough training data. Found {len(data)} samples, need at least 10."}), 400
@@ -388,8 +405,8 @@ def train_personal_model():
         if len(shot_types) < 1:
             return jsonify({"error": f"Need at least 1 shot type. Currently have: {', '.join(shot_types)}"}), 400
         
-        # Get feature columns (all columns except shot_name and any rating columns)
-        feature_cols = [col for col in data.columns if col != 'shot_name' and col not in ['rating', 'ratings']]
+        # Get feature columns (all columns except shot_name and rating)
+        feature_cols = [col for col in data.columns if col != 'shot_name' and col != 'rating']
         
         # Feature columns
         X = data[feature_cols]
@@ -615,8 +632,15 @@ def to_tflite():
         # Generate quantization data
         data = pd.read_csv(personal_data_path)
         
-        # Get feature columns (all columns except shot_name and any rating columns)
-        feature_cols = [col for col in data.columns if col != 'shot_name' and col not in ['rating', 'ratings']]
+        # Standardize rating column names
+        if 'ratings' in data.columns and 'rating' not in data.columns:
+            data.rename(columns={'ratings': 'rating'}, inplace=True)
+            # Save standardized data
+            data.to_csv(personal_data_path, index=False)
+            print("Standardized CSV: 'ratings' column renamed to 'rating'")
+        
+        # Get feature columns (all columns except shot_name and rating)
+        feature_cols = [col for col in data.columns if col != 'shot_name' and col != 'rating']
         
         # Feature data
         X = data[feature_cols]
@@ -643,6 +667,49 @@ def to_tflite():
                          download_name=output_filename, as_attachment=True)
     except Exception as e:
         print(f"TFLite conversion error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/standardize_csv", methods=["GET"])
+def standardize_csv():
+    """Standardize the CSV file to use a consistent 'rating' column"""
+    try:
+        if not os.path.exists(personal_data_path):
+            return jsonify({"message": "No CSV file found."}), 404
+            
+        # Load data
+        data = pd.read_csv(personal_data_path)
+        
+        # Check if both columns exist
+        has_ratings = 'ratings' in data.columns
+        has_rating = 'rating' in data.columns
+        
+        # Standardize the columns
+        if has_ratings and has_rating:
+            # Both columns exist, merge them
+            # If rating is not NaN, use it, otherwise use ratings
+            data['rating'] = data['rating'].fillna(data['ratings'])
+            data = data.drop(columns=['ratings'])
+            message = "Merged 'ratings' and 'rating' columns"
+        elif has_ratings and not has_rating:
+            # Only 'ratings' exists, rename it
+            data = data.rename(columns={'ratings': 'rating'})
+            message = "Renamed 'ratings' column to 'rating'"
+        elif not has_ratings and has_rating:
+            # Only 'rating' exists, already standardized
+            message = "CSV already uses standardized 'rating' column"
+        else:
+            # Neither column exists, nothing to do
+            message = "No rating columns found in the CSV"
+        
+        # Save the standardized data
+        data.to_csv(personal_data_path, index=False)
+        
+        return jsonify({
+            "message": f"CSV standardized successfully. {message}",
+            "rows": len(data)
+        }), 200
+        
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
