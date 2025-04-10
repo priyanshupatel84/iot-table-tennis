@@ -101,7 +101,10 @@
               <p>Accuracy: <strong id="accuracy-value">0%</strong></p>
               <p>Loss: <strong id="loss-value">0</strong></p>
               <div id="tflite-status" class="tflite-status"></div>
-              <button class="btn btn-sm btn-secondary download-btn" onclick="downloadTFLiteModel()">Download TFLite Model</button>
+              <div class="btn-group mt-2">
+                <button class="btn btn-sm btn-secondary download-btn" onclick="downloadTFLiteModel()">Download TFLite Model</button>
+                <button class="btn btn-sm btn-info download-btn" onclick="convertToTFLite()">Generate TFLite Model</button>
+              </div>
             </div>
           </div>
         </div>
@@ -393,17 +396,39 @@
       document.getElementById("training-progress").style.display = "block";
       document.getElementById("training-results").style.display = "none";
       
+      // Add a timeout handler to catch server crashes
+      let trainingTimeout;
+      const TRAINING_TIMEOUT = 60000; // 60 seconds timeout
+      
       try {
-        const response = await fetch("/train_personal_model", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" }
+        // Setup timeout handler
+        const timeoutPromise = new Promise((_, reject) => {
+          trainingTimeout = setTimeout(() => {
+            reject(new Error("Training timed out. The server may be processing a large dataset or has crashed."));
+          }, TRAINING_TIMEOUT);
         });
+        
+        // Start the actual fetch request with timeout race
+        const response = await Promise.race([
+          fetch("/train_personal_model", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" }
+          }),
+          timeoutPromise
+        ]);
+        
+        // Clear the timeout since we got a response
+        clearTimeout(trainingTimeout);
         
         const data = await response.json();
         document.getElementById("training-progress").style.display = "none";
         
         if (data.error) {
-          document.getElementById("train-status").innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+          let errorMessage = data.error;
+          if (data.details) {
+            errorMessage += `<br><small>${data.details}</small>`;
+          }
+          document.getElementById("train-status").innerHTML = `<div class="alert alert-danger">${errorMessage}</div>`;
         } else {
           document.getElementById("train-status").innerHTML = `<div class="alert alert-success">${data.message}</div>`;
           document.getElementById("training-results").style.display = "block";
@@ -415,14 +440,52 @@
           document.getElementById("test-section").style.display = "block";
         }
       } catch (error) {
+        // Clear timeout just in case
+        if (trainingTimeout) clearTimeout(trainingTimeout);
+        
         document.getElementById("training-progress").style.display = "none";
-        document.getElementById("train-status").innerHTML = `<div class="alert alert-danger">Training failed: ${error.message}</div>`;
+        
+        let errorMessage = error.message;
+        if (error.message.includes("timed out") || error.message.includes("Failed to fetch") || 
+            error.message.includes("NetworkError") || error.message.includes("network error")) {
+          errorMessage = `The server connection was lost during training. This could be because:<br>
+            - The model training is taking too long<br>
+            - The dataset is too large for the server to handle<br>
+            - There was a server crash during processing<br><br>
+            Try simplifying your model or reducing your dataset size.`;
+        }
+        
+        document.getElementById("train-status").innerHTML = `<div class="alert alert-danger">
+          <strong>Training failed:</strong><br>${errorMessage}
+        </div>`;
         console.error("Training error:", error);
       }
     }
 
     function downloadTFLiteModel() {
       window.location.href = "/to-tflite";
+    }
+
+    async function convertToTFLite() {
+      document.getElementById("tflite-status").textContent = "Converting to TFLite format...";
+      
+      try {
+        const response = await fetch("/convert-to-tflite", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" }
+        });
+        
+        const data = await response.json();
+        
+        if (data.error) {
+          document.getElementById("tflite-status").textContent = `Error: ${data.error}`;
+        } else {
+          document.getElementById("tflite-status").textContent = data.message || "TFLite conversion successful!";
+        }
+      } catch (error) {
+        document.getElementById("tflite-status").textContent = `Error: ${error.message}`;
+        console.error("TFLite conversion error:", error);
+      }
     }
 
     // Variables for Test Session

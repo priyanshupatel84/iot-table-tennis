@@ -14,6 +14,7 @@ import shutil
 import sys
 import logging
 from werkzeug.utils import secure_filename
+import traceback
 
 app = Flask(__name__)
 
@@ -387,7 +388,12 @@ def train_personal_model():
             return jsonify({"error": "No training data found. Record some shots first."}), 400
             
         # Load the data from CSV
-        data = pd.read_csv(personal_data_path)
+        try:
+            data = pd.read_csv(personal_data_path)
+            print(f"Successfully loaded training data with {len(data)} samples")
+        except Exception as e:
+            print(f"Error reading CSV: {str(e)}")
+            return jsonify({"error": f"Error reading training data: {str(e)}"}), 500
         
         # Standardize rating column names
         if 'ratings' in data.columns and 'rating' not in data.columns:
@@ -404,9 +410,16 @@ def train_personal_model():
         shot_types = data['shot_name'].unique()
         if len(shot_types) < 1:
             return jsonify({"error": f"Need at least 1 shot type. Currently have: {', '.join(shot_types)}"}), 400
+            
+        print(f"Found {len(shot_types)} unique shot types: {', '.join(shot_types)}")
         
         # Get feature columns (all columns except shot_name and rating)
         feature_cols = [col for col in data.columns if col != 'shot_name' and col != 'rating']
+        
+        if not feature_cols:
+            return jsonify({"error": "No valid feature columns found in data."}), 400
+            
+        print(f"Using feature columns: {', '.join(feature_cols)}")
         
         # Feature columns
         X = data[feature_cols]
@@ -414,101 +427,107 @@ def train_personal_model():
         # Target column
         y = data['shot_name'].str.strip()  # Strip whitespace from shot names
         
-        # Scale features for better model performance
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        
-        # Save the scaler for later use in prediction
-        joblib.dump(scaler, os.path.join(base_path, 'personal_scaler.pkl'))
-        
-        # Create a label encoder to convert shot types to numbers
-        from sklearn.preprocessing import LabelEncoder
-        label_encoder = LabelEncoder()
-        y_encoded = label_encoder.fit_transform(y)
-        
-        # Save the encoder for prediction
-        joblib.dump(label_encoder, os.path.join(base_path, 'personal_encoder.pkl'))
-        
-        # Create a simple sequential model with dropout for regularization
-        model = tf.keras.Sequential([
-            tf.keras.layers.Dense(64, activation='relu', input_shape=(X.shape[1],)),
-            tf.keras.layers.Dropout(0.3),
-            tf.keras.layers.Dense(32, activation='relu'),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(len(shot_types), activation='softmax')
-        ])
-        
-        # Compile the model
-        model.compile(
-            optimizer='adam',
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        
-        # Train the model
-        history = model.fit(
-            X_scaled, y_encoded,
-            epochs=20,
-            batch_size=8,
-            validation_split=0.2,
-            verbose=1  # Set to 1 to see progress
-        )
-        
-        # Get training metrics
-        loss_value = history.history['loss'][-1]
-        accuracy = history.history['accuracy'][-1]
-        
-        # Handle NaN values for JSON response
-        if np.isnan(loss_value):
-            loss_value = 0.0
-        if np.isnan(accuracy):
-            accuracy = 0.0
-        
-        # Save the Keras model
-        model_path = os.path.join(base_path, 'personal_model.h5')
-        model.save(model_path)
-        
-        # Generate representative dataset for quantization if needed
         try:
-            quantize_data = []
-            for i in range(min(10, len(X_scaled))):
-                quantize_data.append(X_scaled[i])
+            # Scale features for better model performance
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
             
-            # Convert to TFLite with a simplified converter configuration
-            tflite_path = model_path.replace('.h5', '.tflite')
-            converter = tf.lite.TFLiteConverter.from_keras_model(model)
-            tflite_model = converter.convert()
-            
-            with tf.io.gfile.GFile(tflite_path, 'wb') as f:
-                f.write(tflite_model)
-                
-            tflite_status = "TFLite model created successfully!"
+            # Save the scaler for later use in prediction
+            joblib.dump(scaler, os.path.join(base_path, 'personal_scaler.pkl'))
+            print("Scaler saved successfully")
         except Exception as e:
-            print(f"TFLite conversion error (non-critical): {str(e)}")
-            tflite_status = f"Basic model trained, but TFLite conversion skipped: {str(e)}"
-            tflite_path = None
+            print(f"Error in scaling features: {str(e)}")
+            return jsonify({"error": f"Error in scaling features: {str(e)}"}), 500
         
-        # Try to create C header if TFLite conversion succeeded
-        c_header_path = None
-        if tflite_path and os.path.exists(tflite_path):
-            try:
-                if not os.path.exists(os.path.join(base_path, 'c_header')):
-                    os.makedirs(os.path.join(base_path, 'c_header'))
-                c_header_path = os.path.join(base_path, 'c_header', 'model.h')
-                tflite_to_c(tflite_path, os.path.join(base_path, 'c_header'))
-            except Exception as e:
-                print(f"C header generation error (non-critical): {str(e)}")
+        try:
+            # Create a label encoder to convert shot types to numbers
+            from sklearn.preprocessing import LabelEncoder
+            label_encoder = LabelEncoder()
+            y_encoded = label_encoder.fit_transform(y)
+            
+            # Save the encoder for prediction
+            joblib.dump(label_encoder, os.path.join(base_path, 'personal_encoder.pkl'))
+            print("Label encoder saved successfully")
+        except Exception as e:
+            print(f"Error in encoding labels: {str(e)}")
+            return jsonify({"error": f"Error in encoding labels: {str(e)}"}), 500
         
-        return jsonify({
-            "message": "Model trained successfully!", 
-            "accuracy": float(accuracy * 100),  # Convert to percentage
-            "loss": float(loss_value),
-            "tflite_status": tflite_status
-        }), 200
-        
+        try:
+            # Create a simple sequential model with fewer parameters to avoid memory issues
+            model = tf.keras.Sequential([
+                tf.keras.layers.Dense(32, activation='relu', input_shape=(X.shape[1],)),
+                tf.keras.layers.Dropout(0.2),
+                tf.keras.layers.Dense(16, activation='relu'),
+                tf.keras.layers.Dense(len(shot_types), activation='softmax')
+            ])
+            
+            # Compile the model with a simpler optimizer
+            model.compile(
+                optimizer='adam',
+                loss='sparse_categorical_crossentropy',
+                metrics=['accuracy']
+            )
+            
+            print("Model created and compiled successfully")
+            
+            # Set a callback to prevent the training from taking too long
+            early_stopping = tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=5,
+                restore_best_weights=True
+            )
+            
+            # Train the model with fewer epochs and a smaller batch size
+            history = model.fit(
+                X_scaled, y_encoded,
+                epochs=15,  # Reduced epochs
+                batch_size=4,  # Smaller batch size
+                validation_split=0.2,
+                verbose=1,
+                callbacks=[early_stopping]
+            )
+            
+            print("Model training completed successfully")
+            
+            # Get training metrics
+            loss_value = history.history['loss'][-1]
+            accuracy = history.history['accuracy'][-1]
+            
+            # Handle NaN values for JSON response
+            if np.isnan(loss_value):
+                loss_value = 0.0
+            if np.isnan(accuracy):
+                accuracy = 0.0
+                
+            print(f"Training metrics: loss={loss_value}, accuracy={accuracy}")
+            
+            # Save the Keras model
+            model_path = os.path.join(base_path, 'personal_model.h5')
+            model.save(model_path)
+            print(f"Model saved to {model_path}")
+            
+            # Don't try to create TFLite model in the same request to avoid timeouts
+            # Just report success and let the user convert to TFLite separately if needed
+            return jsonify({
+                "message": "Model trained successfully!", 
+                "accuracy": float(accuracy * 100),  # Convert to percentage
+                "loss": float(loss_value),
+                "tflite_status": "Training successful, but TFLite conversion skipped for performance. Use /to-tflite endpoint to convert."
+            }), 200
+        except Exception as e:
+            print(f"Error in model training: {str(e)}")
+            error_msg = str(e)
+            # Return a more detailed error message
+            return jsonify({
+                "error": f"Error in model training: {error_msg}",
+                "details": "The server encountered an error during model training. Try again with fewer data points or simplify your model."
+            }), 500
+            
     except Exception as e:
-        print(f"Training error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        error_msg = str(e)
+        print(f"Training error: {error_msg}")
+        traceback.print_exc()  # Print full stack trace to server logs
+        return jsonify({"error": error_msg}), 500
 
 @app.route("/predict_shot", methods=["POST"])
 def predict_shot():
@@ -897,6 +916,114 @@ def record_test_data():
             "error": error_msg, 
             "status": "error"
         }), 500
+
+@app.route("/convert-to-tflite", methods=["POST"])
+def convert_to_tflite():
+    """Convert the trained model to TFLite format as a separate step"""
+    try:
+        # Check if the model exists
+        model_path = os.path.join(base_path, 'personal_model.h5')
+        if not os.path.exists(model_path):
+            return jsonify({"error": "No trained model found. Train a model first."}), 400
+            
+        # Check if the scaler exists
+        scaler_path = os.path.join(base_path, 'personal_scaler.pkl')
+        if not os.path.exists(scaler_path):
+            return jsonify({"error": "Model scaler not found. Train the model again."}), 400
+            
+        # Load the model
+        try:
+            model = tf.keras.models.load_model(model_path)
+            print("Model loaded successfully")
+        except Exception as e:
+            print(f"Error loading model: {str(e)}")
+            return jsonify({"error": f"Failed to load model: {str(e)}"}), 500
+            
+        # Load the data for quantization representation
+        try:
+            # Load data for representative dataset
+            data = pd.read_csv(personal_data_path)
+            
+            # Standardize rating column names
+            if 'ratings' in data.columns and 'rating' not in data.columns:
+                data.rename(columns={'ratings': 'rating'}, inplace=True)
+                
+            # Get feature columns
+            feature_cols = [col for col in data.columns if col != 'shot_name' and col != 'rating']
+            X = data[feature_cols]
+            
+            # Load the scaler
+            scaler = joblib.load(scaler_path)
+            X_scaled = scaler.transform(X)
+            
+            # Create representative dataset
+            quantize_data = []
+            for i in range(min(10, len(X_scaled))):
+                quantize_data.append(X_scaled[i])
+                
+            print(f"Created representative dataset with {len(quantize_data)} samples")
+        except Exception as e:
+            print(f"Error preparing quantization data: {str(e)}")
+            # Continue without quantization data
+            quantize_data = None
+            
+        # Convert to TFLite
+        try:
+            tflite_path = model_path.replace('.h5', '.tflite')
+            
+            # Simple conversion without quantization if data preparation failed
+            converter = tf.lite.TFLiteConverter.from_keras_model(model)
+            
+            # Only use quantization if we have data
+            if quantize_data:
+                def representative_dataset_generator():
+                    for value in quantize_data:
+                        # Each scalar value must be inside of a 2D array that is wrapped in a list
+                        yield [np.array(value, dtype=np.float32, ndmin=2)]
+                
+                converter.optimizations = [tf.lite.Optimize.DEFAULT]
+                converter.representative_dataset = representative_dataset_generator
+                print("Using quantization optimization")
+            
+            # Convert the model
+            tflite_model = converter.convert()
+            
+            # Save the TFLite model
+            with tf.io.gfile.GFile(tflite_path, 'wb') as f:
+                f.write(tflite_model)
+                
+            print(f"TFLite model saved to {tflite_path}")
+            
+            # Try to create C header
+            try:
+                c_header_dir = os.path.join(base_path, 'c_header')
+                if not os.path.exists(c_header_dir):
+                    os.makedirs(c_header_dir)
+                
+                c_header_path = os.path.join(c_header_dir, 'model.h')
+                tflite_to_c(tflite_path, c_header_dir)
+                print(f"C header saved to {c_header_path}")
+                
+                c_header_status = "C header generated successfully"
+            except Exception as e:
+                print(f"C header generation error: {str(e)}")
+                c_header_status = f"TFLite model created, but C header generation failed: {str(e)}"
+            
+            return jsonify({
+                "message": "TFLite model created successfully!",
+                "c_header_status": c_header_status,
+                "tflite_path": tflite_path
+            }), 200
+            
+        except Exception as e:
+            print(f"TFLite conversion error: {str(e)}")
+            traceback.print_exc()
+            return jsonify({"error": f"TFLite conversion failed: {str(e)}"}), 500
+            
+    except Exception as e:
+        print(f"TFLite process error: {str(e)}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
