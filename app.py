@@ -712,5 +712,112 @@ def standardize_csv():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/start_session", methods=["POST"])
+def start_session():
+    """Start a recording session and save sensor data to personal_shot.csv"""
+    try:
+        data = request.get_json()
+        shot_name = data.get('shot_name')
+        threshold = data.get('threshold', 0.2)  # Default threshold 0.2g
+        
+        if not shot_name:
+            return jsonify({"error": "Shot name is required"}), 400
+            
+        # Clean the shot name (remove trailing spaces)
+        shot_name = shot_name.strip()
+        
+        # Return success to indicate the session has started
+        return jsonify({
+            "message": f"Session started for shot type: {shot_name}",
+            "shot_name": shot_name,
+            "threshold": threshold,
+            "status": "recording"
+        }), 200
+        
+    except Exception as e:
+        print(f"Session start error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/record_session_data", methods=["POST"])
+def record_session_data():
+    """Record sensor data during an active session"""
+    try:
+        data = request.get_json()
+        shot_name = data.get('shot_name')
+        sensor_data = data.get('sensor_data', [])
+        
+        if not shot_name or not sensor_data:
+            return jsonify({"error": "Shot name and sensor data are required"}), 400
+            
+        # Validate the sensor data
+        # Validate the shot data pattern
+        if not is_valid_shot(sensor_data):
+            print(f"Shot rejected: {shot_name}")
+            return jsonify({"message": "Data rejected - not a valid shot pattern", "status": "rejected"}), 200
+            
+        valid_data_points = []
+        for point in sensor_data:
+            if all(k in point for k in ['ax', 'ay', 'az', 'gx', 'gy', 'gz']):
+                valid_data_points.append({
+                    'shot_name': shot_name.strip(),
+                    'ax': point.get('ax', 0),
+                    'ay': point.get('ay', 0),
+                    'az': point.get('az', 0),
+                    'gx': point.get('gx', 0),
+                    'gy': point.get('gy', 0),
+                    'gz': point.get('gz', 0)
+                })
+                
+        if not valid_data_points:
+            return jsonify({"error": "No valid sensor data points found"}), 400
+            
+        # Create DataFrame
+        df = pd.DataFrame(valid_data_points)
+        
+        # Check if file exists and standardize existing columns if needed
+        file_exists = os.path.isfile(personal_data_path)
+        if file_exists:
+            # Read existing data
+            existing_data = pd.read_csv(personal_data_path)
+            
+            # Standardize columns: Convert 'ratings' to 'rating' if it exists
+            if 'ratings' in existing_data.columns and 'rating' not in existing_data.columns:
+                existing_data.rename(columns={'ratings': 'rating'}, inplace=True)
+                # Save the standardized data back
+                existing_data.to_csv(personal_data_path, index=False)
+                print("Standardized CSV: 'ratings' column renamed to 'rating'")
+        
+        # Append to CSV
+        df.to_csv(personal_data_path, mode='a', header=not file_exists, index=False)
+        
+        return jsonify({
+            "message": f"Recorded {len(valid_data_points)} data points for {shot_name}",
+            "points_saved": len(valid_data_points),
+            "status": "success"
+        }), 200
+        
+    except Exception as e:
+        print(f"Recording error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/end_session", methods=["POST"])
+def end_session():
+    """End the recording session"""
+    try:
+        data = request.get_json()
+        shot_name = data.get('shot_name', 'Unknown')
+        
+        # No actual state to clear since we're saving directly to CSV
+        # This is just to confirm the session ended
+        
+        return jsonify({
+            "message": f"Session ended for {shot_name}",
+            "status": "idle"
+        }), 200
+        
+    except Exception as e:
+        print(f"End session error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
     app.run(debug=True)

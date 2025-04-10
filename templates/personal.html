@@ -247,17 +247,20 @@
           document.getElementById("p-status").innerHTML = "Status: <strong class='shot-detected'>Processing Shot...</strong>";
           document.getElementById("p-status").className = "mt-2 status-indicator bg-info";
           
-          // Send shot to backend
-          fetch("/save_personal_shot", {
+          // Send shot to the session data recording endpoint
+          fetch("/record_session_data", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ shot_name: shotLabel, features: currentShot })
+            body: JSON.stringify({ 
+              shot_name: shotLabel.trim(), 
+              sensor_data: currentShot 
+            })
           }).then(res => res.json())
             .then(data => {
               console.log("Shot save response:", data);
               // Update UI based on response from backend
-              if (data.valid) {
-                document.getElementById("p-status").innerHTML = "Status: <strong class='shot-detected'>Shot Saved!</strong>";
+              if (data.status === "success") {
+                document.getElementById("p-status").innerHTML = `Status: <strong class='shot-detected'>Shot Saved! (${data.points_saved} points)</strong>`;
                 document.getElementById("p-status").className = "mt-2 status-indicator bg-success";
               } else {
                 document.getElementById("p-status").innerHTML = `Status: <strong class='shot-rejected'>${data.message || 'Failed threshold check'}</strong>`;
@@ -298,39 +301,83 @@
         document.getElementById("p-error-message").textContent = "";
       }
       
-      document.getElementById("p-status").innerHTML = "Status: <strong>Recording...</strong>";
-      document.getElementById("p-status").className = "mt-2 status-indicator";
-      isPRecording = true;
-      pRawSensorData = [];
-      
-      pSessionStartTime = Date.now();
-      updatePTimer();
-      pTimerInterval = setInterval(updatePTimer, 1000);
-      
-      // Reset shot detection state
-      isInShot = false;
-      currentShot = [];
-      if (shotTimeout) clearTimeout(shotTimeout);
-      
-      pBluetoothCharacteristic.startNotifications()
-        .then(() => {
-          pBluetoothCharacteristic.addEventListener('characteristicvaluechanged', pHandleData);
-        })
-        .catch(err => {
-          document.getElementById("p-error-message").textContent = "Failed to start notifications: " + err;
+      // Call the backend to start a session
+      try {
+        const response = await fetch("/start_session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ 
+            shot_name: shotLabel,
+            threshold: parseFloat(pThresholdSlider.value)
+          })
         });
+        
+        const data = await response.json();
+        
+        if (data.error) {
+          document.getElementById("p-error-message").textContent = data.error;
+          return;
+        }
+        
+        document.getElementById("p-status").innerHTML = "Status: <strong>Recording...</strong>";
+        document.getElementById("p-status").className = "mt-2 status-indicator";
+        isPRecording = true;
+        pRawSensorData = [];
+        
+        pSessionStartTime = Date.now();
+        updatePTimer();
+        pTimerInterval = setInterval(updatePTimer, 1000);
+        
+        // Reset shot detection state
+        isInShot = false;
+        currentShot = [];
+        if (shotTimeout) clearTimeout(shotTimeout);
+        
+        pBluetoothCharacteristic.startNotifications()
+          .then(() => {
+            pBluetoothCharacteristic.addEventListener('characteristicvaluechanged', pHandleData);
+          })
+          .catch(err => {
+            document.getElementById("p-error-message").textContent = "Failed to start notifications: " + err;
+          });
+          
+      } catch (error) {
+        document.getElementById("p-error-message").textContent = "Failed to start session: " + error;
+      }
     }
 
     async function stopPersonalSession() {
       isPRecording = false;
       clearInterval(pTimerInterval);
       document.getElementById("p-session-timer").textContent = "⏱️ Time: 00:00";
+      
+      // If there's an ongoing shot being detected, finish processing it
+      if (isInShot && currentShot.length > 0) {
+        processEndOfShot();
+      }
+      
       if (pBluetoothCharacteristic) {
         await pBluetoothCharacteristic.stopNotifications();
         pBluetoothCharacteristic.removeEventListener("characteristicvaluechanged", pHandleData);
       }
-      document.getElementById("p-status").innerHTML = "Status: <strong>Stopped</strong>";
-      document.getElementById("p-status").className = "mt-2 status-indicator";
+      
+      // Signal to the backend that the session is done
+      const shotLabel = document.getElementById("shotLabel").value.trim();
+      try {
+        const response = await fetch("/end_session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ shot_name: shotLabel })
+        });
+        
+        const data = await response.json();
+        document.getElementById("p-status").innerHTML = `Status: <strong>${data.status.toUpperCase()}</strong>`;
+        document.getElementById("p-status").className = "mt-2 status-indicator";
+      } catch (error) {
+        document.getElementById("p-error-message").textContent = "Error ending session: " + error;
+        document.getElementById("p-status").innerHTML = "Status: <strong>Error</strong>";
+        document.getElementById("p-status").className = "mt-2 status-indicator bg-danger";
+      }
     }
 
     function updatePTimer() {
