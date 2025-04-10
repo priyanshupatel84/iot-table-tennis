@@ -39,6 +39,26 @@
       font-style: italic;
       color: #666;
     }
+    .rating-star {
+      color: gold;
+      font-size: 1.2rem;
+    }
+    .rating-container {
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+    }
+    .individual-shots {
+      margin-top: 15px;
+      padding: 10px;
+      background-color: #2a2a2a;
+      border-radius: 5px;
+    }
+    .shot-item {
+      margin-bottom: 10px;
+      padding: 8px;
+      border-bottom: 1px solid #444;
+    }
     
     @keyframes flash {
       0% { background-color: rgba(0, 255, 159, 0.5); }
@@ -494,6 +514,7 @@
     let testLastTimestamp = 0;
     let testTimerInterval;
     let shotCount = 0;
+    let shotHistory = []; // Array to store shot data with ratings
 
     async function startTestSession() {
       // Initialize bluetooth connection for testing
@@ -512,6 +533,7 @@
         testLastTimestamp = Date.now();
         testSessionStartTime = Date.now();
         shotCount = 0;
+        shotHistory = []; // Reset shot history
         
         // Clear previous test data
         pClearIndexedDB();
@@ -550,6 +572,16 @@
       
       // If there's an in-progress shot, process it
       if (isInShot && currentShot.length >= 3) {
+        // Generate random rating for this shot
+        const rating = Math.floor(Math.random() * 5) + 1;
+        
+        // Add to shot history
+        shotHistory.push({
+          timestamp: new Date().toLocaleTimeString(),
+          index: shotCount,
+          rating: rating
+        });
+        
         // Send the final shot data
         try {
           const response = await fetch("/record_test_data", {
@@ -626,6 +658,52 @@
             html += `</tbody></table></div>`;
           }
           
+          // Add shot history with ratings
+          if (shotHistory.length > 0) {
+            html += `<div class="individual-shots">
+              <h5>Individual Shot Ratings:</h5>
+              <div class="table-responsive">
+                <table class="table table-dark table-striped">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Time</th>
+                      <th>Rating</th>
+                    </tr>
+                  </thead>
+                  <tbody>`;
+                  
+            shotHistory.forEach(shot => {
+              html += `<tr>
+                <td>${shot.index}</td>
+                <td>${shot.timestamp}</td>
+                <td>`;
+              
+              // Add star rating
+              for (let i = 1; i <= 5; i++) {
+                const starClass = i <= shot.rating ? "rating-star" : "text-muted";
+                html += `<span class="${starClass}">★</span>`;
+              }
+              html += ` (${shot.rating}/5)</td>
+              </tr>`;
+            });
+            
+            html += `</tbody></table></div>`;
+            
+            // Calculate average rating
+            const avgRating = shotHistory.reduce((sum, shot) => sum + shot.rating, 0) / shotHistory.length;
+            html += `<div class="rating-container">
+              <strong>Average Rating: </strong>&nbsp;`;
+            
+            // Display average stars
+            for (let i = 1; i <= 5; i++) {
+              const starClass = i <= Math.round(avgRating) ? "rating-star" : "text-muted";
+              html += `<span class="${starClass}">★</span>`;
+            }
+            html += ` (${avgRating.toFixed(1)}/5)
+            </div>`;
+          }
+          
           document.getElementById("test-result").innerHTML = html;
         }
       } catch (error) {
@@ -680,6 +758,16 @@
         shotTimeout = setTimeout(() => {
           // Process the completed shot for testing
           if (currentShot.length >= 3) {
+            // Generate random rating between 1-5 for this shot
+            const rating = Math.floor(Math.random() * 5) + 1;
+            
+            // Add to shot history
+            shotHistory.push({
+              timestamp: new Date().toLocaleTimeString(),
+              index: shotCount,
+              rating: rating
+            });
+            
             // Send test data to be saved in session.json
             fetch("/record_test_data", {
               method: "POST",
@@ -691,7 +779,7 @@
               .then(data => {
                 console.log("Test data saved:", data);
                 if (data.status === "success") {
-                  document.getElementById("test-status").innerHTML = `Status: <strong>Shot Recorded for Testing (${data.points_saved} points)</strong>`;
+                  document.getElementById("test-status").innerHTML = `Status: <strong>Shot ${shotCount} Recorded (${data.points_saved} points) - Rated ${rating}/5 ★</strong>`;
                 }
               })
               .catch(err => {
@@ -700,8 +788,10 @@
           }
           
           if (isTestRecording) {
-            document.getElementById("test-status").innerHTML = "Status: <strong>Recording for Test...</strong>";
-            document.getElementById("test-status").className = "mt-2 status-indicator";
+            setTimeout(() => {
+              document.getElementById("test-status").innerHTML = "Status: <strong>Recording for Test...</strong>";
+              document.getElementById("test-status").className = "mt-2 status-indicator";
+            }, 1500);
           }
           isInShot = false;
           currentShot = [];
